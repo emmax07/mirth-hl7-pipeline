@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: health_db
+    environment:
+      POSTGRES_DB: hospital_ehr
+      POSTGRES_USER: ehr_admin
+      POSTGRES_PASSWORD: SecretPassword123
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+
+  mirth:
+    image: nextgenconnect/mirth-connect:latest
+    container_name: mirth_engine
+    ports:
+      - "8080:8080" # HTTP Web Interface
+      - "8443:8443" # HTTPS Administrator
+      - "6661:6661" # MLLP HL7 Inbound Listener Port
+    depends_on:
+      - postgres
+    restart: unless-stopped
