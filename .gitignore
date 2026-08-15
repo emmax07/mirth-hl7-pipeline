@@ -10,5 +10,7 @@ Thumbs.db
 __pycache__/
 *.pyc
 
+.env
+
 # Runtime logs
 *.log
