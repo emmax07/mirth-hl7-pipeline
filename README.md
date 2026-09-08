@@ -30,3 +30,15 @@ docker ps
 # Verify PostgreSQL initialized both tables (patients and dead_letter_queue):
 
 docker exec -it health_db psql -U ehr_admin -d hospital_ehr -c "\dt"
+
+# Containerized Healthcare HL7 Data Pipeline
+
+A multi-container HL7 v2 message ingestion and transformation pipeline using NextGen Connect (Mirth Engine) and PostgreSQL.
+
+## System Architecture
+
+```text
+HL7 Source -> MLLP (6661) -> NextGen Connect -> SQL UPSERT -> PostgreSQL (5432)
+                                   |
+                                   +--> Error Trap -> DLQ Table
+```

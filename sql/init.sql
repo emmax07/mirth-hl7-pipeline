@@ -1,4 +1,4 @@
--- Target Electronic Health Record (EHR) Patient Database
+-- 1. Patients Table
 CREATE TABLE IF NOT EXISTS patients (
     patient_id VARCHAR(50) PRIMARY KEY,
     first_name VARCHAR(100),
@@ -10,7 +10,19 @@ CREATE TABLE IF NOT EXISTS patients (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Dead-Letter Queue (DLQ) for Failed / Corrupted Messages
+-- 2. Visits Table
+CREATE TABLE IF NOT EXISTS visits (
+    visit_number VARCHAR(50) PRIMARY KEY,
+    patient_id VARCHAR(50) REFERENCES patients(patient_id) ON DELETE CASCADE,
+    patient_class VARCHAR(50),
+    assigned_location VARCHAR(100),
+    attending_doctor VARCHAR(150),
+    admit_date TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. Dead-Letter Queue (DLQ) Table
 CREATE TABLE IF NOT EXISTS dead_letter_queue (
     dlq_id SERIAL PRIMARY KEY,
     original_channel_id VARCHAR(100),
@@ -21,3 +33,13 @@ CREATE TABLE IF NOT EXISTS dead_letter_queue (
     failed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     status VARCHAR(20) DEFAULT 'UNRESOLVED' -- UNRESOLVED, RETRIED, DISCARDED
 );
+
+-- 4. DLQ Compatibility View (Maps dead_letter_queue to dlq_messages for test suites)
+CREATE OR REPLACE VIEW dlq_messages AS 
+SELECT 
+    dlq_id AS id, 
+    original_channel_name AS channel_name,
+    raw_hl7_message AS raw_message,
+    error_message, 
+    failed_at AS created_at 
+FROM dead_letter_queue;

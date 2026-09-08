@@ -8,8 +8,10 @@ This guide provides step-by-step instructions for configuring, deploying, and ex
 
 - **Protocol:** MLLP (Minimum Lower Layer Protocol) over TCP Port `6661`
 - **Data Format:** Inbound HL7 v2.x ADT (Admit, Discharge, Transfer) messages
-- **Transformer:** JavaScript engine extracting `PID` (Patient ID, Name, DOB, Gender) and `PV1` (Patient Location)
-- **Destination:** PostgreSQL (`hospital_ehr` database, `patients` table) via JDBC
+- **Transformer:** JavaScript engine extracting `PID` (Patient ID, Name, DOB, Gender) and `PV1` (Visit Number, Class, Location, Doctor, Admit Date) into Mirth channel map variables
+- **Destinations:** PostgreSQL (`hospital_ehr` database) via twin native Database Writer connectors:
+  1. `Postgres - Patients Upsert` (`patients` table)
+  2. `Postgres - Visits Upsert` (`visits` table)
 
 ---
 
@@ -47,84 +49,172 @@ This guide provides step-by-step instructions for configuring, deploying, and ex
 
 ---
 
-### Step 4: Configure the Destination (PostgreSQL Writer)
+### Step 4: Add the JavaScript Transformer
 
 1. Click the **Destinations** tab at the top.
-2. Set the following fields:
-   - **Connector Type:** `Database Writer`
-   - **Driver:** `PostgreSQL` (`org.postgresql.Driver`)
-   - **URL:** `jdbc:postgresql://postgres:5432/hospital_ehr`
-   - **Username:** `${POSTGRES_USER}` (or `ehr_admin`)
-   - **Password:** `${POSTGRES_PASSWORD}`
-3. Under **Database Writer Settings**, set **Use JavaScript** to **No**.
-4. In the **SQL** box, paste:
-
-```sql
-INSERT INTO patients (patient_id, first_name, last_name, dob, gender, assigned_patient_location, updated_at)
-VALUES (${patient_id}, ${first_name}, ${last_name}, ${dob}::DATE, ${gender}, ${location}, CURRENT_TIMESTAMP)
-ON CONFLICT (patient_id) DO UPDATE
-SET assigned_patient_location = EXCLUDED.assigned_patient_location,
-    updated_at = CURRENT_TIMESTAMP;
-```
-
----
-
-### Step 5: Add the JavaScript Transformer
-
-1. On the left sidebar under **Channel Tasks** (or **Destination Tasks**), click **Edit Transformer** (or right-click `Destination 1` $\rightarrow$ **Edit Transformer**).
-2. On the left task menu, click **Add New Step**.
-3. Set **Type** to **JavaScript**.
-4. In the code editor pane, paste:
+2. On the left sidebar under **Destination Tasks**, click **Edit Transformer**.
+3. On the left task menu, click **Add New Step**.
+4. Set **Type** to **JavaScript**.
 
 ```javascript
 try {
-  // Extract PID (Patient Identification) Segment
-  var mrn = msg["PID"]["PID.3"]["PID.3.1"].toString();
-  var lastName = msg["PID"]["PID.5"]["PID.5.1"].toString();
-  var firstName = msg["PID"]["PID.5"]["PID.5.2"].toString();
-  var dobRaw = msg["PID"]["PID.7"]["PID.7.1"].toString(); // Format: YYYYMMDD
-  var gender = msg["PID"]["PID.8"]["PID.8.1"].toString();
-
-  if (!dobRaw || dobRaw.length < 8) {
-    throw new Error("Invalid or missing Date of Birth (PID.7): " + dobRaw);
+  // Helper function for safe string extraction
+  function getHL7Value(node) {
+    return node && node.toString() ? node.toString().trim() : "";
   }
 
-  // Extract PV1 (Patient Visit) Segment
-  var location = msg["PV1"]["PV1.3"]["PV1.3.1"]
-    ? msg["PV1"]["PV1.3"]["PV1.3.1"].toString()
-    : "UNASSIGNED";
+  // Extract PID Fields
+  var mrn = getHL7Value(msg["PID"]["PID.3"]["PID.3.1"]);
+  var lastName = getHL7Value(msg["PID"]["PID.5"]["PID.5.1"]);
+  var firstName = getHL7Value(msg["PID"]["PID.5"]["PID.5.2"]);
+  var dobStr = getHL7Value(msg["PID"]["PID.7"]["PID.7.1"]); // YYYYMMDD
+  var gender = getHL7Value(msg["PID"]["PID.8"]["PID.8.1"]) || "U";
 
-  // Format Date for SQL (YYYY-MM-DD)
-  var formattedDob =
-    dobRaw.substring(0, 4) +
-    "-" +
-    dobRaw.substring(4, 6) +
-    "-" +
-    dobRaw.substring(6, 8);
+  if (!mrn) {
+    throw new Error("Validation Failed: Missing MRN/Patient ID in PID-3");
+  }
 
-  // Map variables for SQL Writer
+  // Format DOB -> YYYY-MM-DD
+  var formattedDOB =
+    dobStr.length >= 8
+      ? dobStr.substring(0, 4) +
+        "-" +
+        dobStr.substring(4, 6) +
+        "-" +
+        dobStr.substring(6, 8)
+      : "1900-01-01";
+
+  // Extract PV1 Fields
+  var visitNumber = getHL7Value(msg["PV1"]["PV1.19"]["PV1.19.1"]);
+  var patientClass = getHL7Value(msg["PV1"]["PV1.2"]["PV1.2.1"]);
+  var location = getHL7Value(msg["PV1"]["PV1.3"]["PV1.3.1"]);
+  var docLast = getHL7Value(msg["PV1"]["PV1.7"]["PV1.7.2"]);
+  var docFirst = getHL7Value(msg["PV1"]["PV1.7"]["PV1.7.1"]);
+  var doctor =
+    docLast || docFirst ? (docLast + " " + docFirst).trim() : "UNASSIGNED";
+  var admitStr = getHL7Value(msg["PV1"]["PV1.44"]["PV1.44.1"]); // YYYYMMDDHHMMSS
+
+  // Format Admit Date -> YYYY-MM-DD HH:MM:SS
+  var formattedAdmit =
+    admitStr.length >= 14
+      ? admitStr.substring(0, 4) +
+        "-" +
+        admitStr.substring(4, 6) +
+        "-" +
+        admitStr.substring(6, 8) +
+        " " +
+        admitStr.substring(8, 10) +
+        ":" +
+        admitStr.substring(10, 12) +
+        ":" +
+        admitStr.substring(12, 14)
+      : new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(
+          new java.util.Date(),
+        );
+
+  // Map variables for Database Writer destinations
   channelMap.put("patient_id", mrn);
-  channelMap.put("last_name", lastName);
   channelMap.put("first_name", firstName);
-  channelMap.put("dob", formattedDob);
+  channelMap.put("last_name", lastName);
+  channelMap.put("dob", formattedDOB);
   channelMap.put("gender", gender);
   channelMap.put("location", location);
-} catch (err) {
-  logger.error("Transformer Error in ADT Pipeline: " + err.message);
-  throw err;
+
+  channelMap.put("visit_number", visitNumber);
+  channelMap.put("patient_class", patientClass);
+  channelMap.put("attending_doctor", doctor);
+  channelMap.put("admit_date", formattedAdmit);
+} catch (e) {
+  logger.error("Mirth Transformer Error: " + e.message);
+  throw e;
 }
 ```
 
-5. Click **Back to Destination** in the left sidebar.
+5. In the code editor pane, paste the transformer code to map HL7 fields into Mirth channel map variables (`channelMap`):
 
----
+### Step 5: Configure the Destinations (Database Writers)
+
+#### Destination 1: Postgres - Patients Upsert
+
+In the Destinations tab, set Name to Postgres - Patients Upsert.
+
+1. Configure settings:
+   Connector Type: Database Writer
+   Driver: PostgreSQL (org.postgresql.Driver)
+   URL: jdbc:postgresql://health_db:5432/hospital_ehr
+   Username: ${POSTGRES_USER} (or ehr_admin)
+   Password: ${POSTGRES_PASSWORD}
+
+Under Database Writer Settings, ensure Use JavaScript is set to No.
+
+2. SQL for patient:
+
+INSERT INTO patients (
+patient_id,
+first_name,
+last_name,
+dob,
+gender,
+assigned_patient_location,
+updated_at
+)
+VALUES (
+${patient_id},${first_name},
+${last_name},${dob}::DATE,
+${gender},${location},
+CURRENT_TIMESTAMP
+)
+ON CONFLICT (patient_id) DO UPDATE SET
+first_name = EXCLUDED.first_name,
+last_name = EXCLUDED.last_name,
+dob = EXCLUDED.dob,
+gender = EXCLUDED.gender,
+assigned_patient_location = EXCLUDED.assigned_patient_location,
+updated_at = CURRENT_TIMESTAMP;
+
+#### Destination 1: Postgres - Patients Upsert
+
+In the Destinations tab, set Name to Postgres - Visits Upsert.
+
+3. Configure settings:
+   Connector Type: Database Writer
+   Driver: PostgreSQL (org.postgresql.Driver)
+   URL: jdbc:postgresql://health_db:5432/hospital_ehr
+   Username: ${POSTGRES_USER} (or ehr_admin)
+   Password: ${POSTGRES_PASSWORD}
+
+Under Database Writer Settings, ensure Use JavaScript is set to No.
+
+4. SQL for visits:
+
+INSERT INTO visits (
+visit_number,
+patient_id,
+patient_class,
+assigned_location,
+attending_doctor,
+admit_date,
+updated_at
+)
+VALUES (
+${visit_number},${patient_id},
+${patient_class},${location},
+${attending_doctor},${admit_date}::TIMESTAMP,
+CURRENT_TIMESTAMP
+)
+ON CONFLICT (visit_number) DO UPDATE SET
+patient_class = EXCLUDED.patient_class,
+assigned_location = EXCLUDED.assigned_location,
+attending_doctor = EXCLUDED.attending_doctor,
+admit_date = EXCLUDED.admit_date,
+updated_at = CURRENT_TIMESTAMP;
 
 ### Step 6: Save, Deploy, and Export XML
 
-1. **Save:** In the left sidebar under **Channel Tasks**, click **Save Changes**.
-2. **Deploy:** Click **Deploy Channel** in the left sidebar to start the listener.
-3. **Export XML File:**
-   - Return to the **Channels** list view (click **Channels** under **Navigation** in the top-left menu).
-   - Click once on `HL7_Inbound_ADT_To_Postgres` to highlight it.
-   - In the left sidebar under **Channel Tasks**, click **Export Channel**.
-   - Save the file as `HL7_Inbound_ADT_To_Postgres.xml` inside your repository's `mirth_channels/` directory.
+1. Save: In the left sidebar under Channel Tasks, click Save Changes.
+2. Deploy: Click Deploy Channel in the left sidebar to start the listener.
+3. Export XML File:
+   - Return to the Channels list view (click Channels under Navigation in the top-left menu).
+   - Click once on HL7_Inbound_ADT_To_Postgres to highlight it.
+4. In the left sidebar under Channel Tasks, click Export Channel.
+5. Save the file as HL7_Inbound_ADT_To_Postgres.xml inside your repository's mirth_channels/ directory.
